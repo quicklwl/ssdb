@@ -62,6 +62,7 @@ class SSDB_Response
 	}
 }
 
+// Depricated, use SimpleSSDB instead!
 class SSDB
 {
 	private $debug = false;
@@ -83,6 +84,12 @@ class SSDB
 		if(function_exists('stream_set_chunk_size')){
 			@stream_set_chunk_size($this->sock, 1024 * 1024);
 		}
+	}
+	
+	function set_timeout($timeout_ms){
+		$timeout_sec = intval($timeout_ms/1000);
+		$timeout_usec = ($timeout_ms - $timeout_sec * 1000) * 1000;
+		@stream_set_timeout($this->sock, $timeout_sec, $timeout_usec);
 	}
 	
 	/**
@@ -347,6 +354,7 @@ class SSDB
 			case 'zremrangebyrank':
 			case 'zremrangebyscore':
 			case 'ttl':
+			case 'expire':
 				if($resp[0] == 'ok'){
 					$val = isset($resp[1])? intval($resp[1]) : 0;
 					return new SSDB_Response($resp[0], $val);
@@ -493,7 +501,7 @@ class SSDB
 		return new SSDB_Response('error', 'Unknown command: $cmd');
 	}
 
-	private function send($data){
+	function send($data){
 		$ps = array();
 		foreach($data as $p){
 			$ps[] = strlen($p);
@@ -523,7 +531,7 @@ class SSDB
 		return $ret;
 	}
 
-	private function recv(){
+	function recv(){
 		$this->step = self::STEP_SIZE;
 		while(true){
 			$ret = $this->parse();

@@ -8,16 +8,14 @@ found in the LICENSE file.
 #include <string.h>
 #include <stdarg.h>
 #include <sys/socket.h>
+#include <netdb.h>
 
 #include "link.h"
 
 #include "link_redis.cpp"
 
-#define MAX_PACKET_SIZE		128 * 1024 * 1024
-#define INIT_BUFFER_SIZE	8
-
-int Link::min_recv_buf = 8 * 1024;
-int Link::min_send_buf = 8 * 1024;
+#define INIT_BUFFER_SIZE  1024
+#define BEST_BUFFER_SIZE  (8 * 1024)
 
 
 Link::Link(bool is_server){
@@ -34,9 +32,6 @@ Link::Link(bool is_server){
 	if(is_server){
 		input = output = NULL;
 	}else{
-		// alloc memory lazily
-		//input = new Buffer(Link::min_recv_buf);
-		//output = new Buffer(Link::min_send_buf);
 		input = new Buffer(INIT_BUFFER_SIZE);
 		output = new Buffer(INIT_BUFFER_SIZE);
 	}
@@ -80,16 +75,49 @@ void Link::noblock(bool enable){
 	}
 }
 
+// TODO: check less than 256
+static bool is_ip(const char *host){
+	int dot_count = 0;
+	int digit_count = 0;
+	for(const char *p = host; *p; p++){
+		if(*p == '.'){
+			dot_count += 1;
+			if(digit_count >= 1 && digit_count <= 3){ 
+				digit_count = 0;
+			}else{
+				return false;
+			}   
+		}else if(*p >= '0' && *p <= '9'){
+			digit_count += 1;
+		}else{
+			return false;
+		}   
+	}   
+	return dot_count == 3;
+}
 
-Link* Link::connect(const char *ip, int port){
+Link* Link::connect(const char *host, int port){
 	Link *link;
 	int sock = -1;
+
+	char ip_resolve[INET_ADDRSTRLEN];
+	if(!is_ip(host)){
+		struct hostent *hptr = gethostbyname(host);
+		for(int i=0; hptr && hptr->h_addr_list[i] != NULL; i++){
+			struct in_addr *addr = (struct in_addr *)hptr->h_addr_list[i];
+			if(inet_ntop(AF_INET, addr, ip_resolve, sizeof(ip_resolve))){
+				//printf("resolve %s: %s\n", host, ip_resolve);
+				host = ip_resolve;
+				break;
+			}
+		}
+	}
 
 	struct sockaddr_in addr;
 	bzero(&addr, sizeof(addr));
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons((short)port);
-	inet_pton(AF_INET, ip, &addr.sin_addr);
+	inet_pton(AF_INET, host, &addr.sin_addr);
 
 	if((sock = ::socket(AF_INET, SOCK_STREAM, 0)) == -1){
 		goto sock_err;
@@ -162,6 +190,7 @@ Link* Link::accept(){
 		}
 	}
 
+	// avoid client side TIME_WAIT
 	struct linger opt = {1, 0};
 	int ret = ::setsockopt(client_sock, SOL_SOCKET, SO_LINGER, (void *)&opt, sizeof(opt));
 	if (ret != 0) {
@@ -177,12 +206,16 @@ Link* Link::accept(){
 }
 
 int Link::read(){
-	if(input->total() == INIT_BUFFER_SIZE){
-		input->grow();
-	}
 	int ret = 0;
 	int want;
+	
 	input->nice();
+	// 由于 recv() 返回的数据是指向 input 所占的内存, 所以, 不能在 recv()
+	// 之后立即就释放内存, 只能在下一次read()的时候再释放.
+	if(input->size() == 0 && input->total() > BEST_BUFFER_SIZE){
+		input->shrink(BEST_BUFFER_SIZE);
+	}
+	
 	while((want = input->space()) > 0){
 		// test
 		//want = 1;
@@ -209,13 +242,11 @@ int Link::read(){
 		}
 	}
 	//log_debug("read %d", ret);
+	//printf("%s\n", hexmem(input->data(), input->size()).c_str());
 	return ret;
 }
 
 int Link::write(){
-	if(output->total() == INIT_BUFFER_SIZE){
-		output->grow();
-	}
 	int ret = 0;
 	int want;
 	while((want = output->size()) > 0){
@@ -245,6 +276,9 @@ int Link::write(){
 		}
 	}
 	output->nice();
+	if(output->size() == 0 && output->total() > BEST_BUFFER_SIZE){
+		output->shrink(BEST_BUFFER_SIZE);
+	}
 	return ret;
 }
 
@@ -271,6 +305,13 @@ const std::vector<Bytes>* Link::recv(){
 	int parsed = 0;
 	int size = input->size();
 	char *head = input->data();
+
+	// ignore leading empty lines
+	while(size > 0 && (head[0] == '\n' || head[0] == '\r')){
+		head ++;
+		size --;
+		parsed ++;
+	}
 	
 	// Redis protocol supports
 	if(head[0] == '*'){
@@ -284,13 +325,6 @@ const std::vector<Bytes>* Link::recv(){
 		}else{
 			return NULL;
 		}
-	}
-
-	// ignore leading empty lines
-	while(size > 0 && (head[0] == '\n' || head[0] == '\r')){
-		head ++;
-		size --;
-		parsed ++;
 	}
 
 	while(size > 0){
@@ -334,14 +368,17 @@ const std::vector<Bytes>* Link::recv(){
 
 		head += head_len + body_len;
 		parsed += head_len + body_len;
-		if(size > 0 && head[0] == '\n'){
+		if(size >= 1 && head[0] == '\n'){
 			head += 1;
 			size -= 1;
 			parsed += 1;
-		}else if(size > 1 && head[0] == '\r' && head[1] == '\n'){
+		}else if(size >= 2 && head[0] == '\r' && head[1] == '\n'){
 			head += 2;
 			size -= 2;
 			parsed += 2;
+		}else if(size >= 2){
+			// bad format
+			return NULL;
 		}else{
 			break;
 		}

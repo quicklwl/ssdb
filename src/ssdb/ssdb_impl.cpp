@@ -16,7 +16,7 @@ found in the LICENSE file.
 #include "t_queue.h"
 
 SSDBImpl::SSDBImpl(){
-	db = NULL;
+	ldb = NULL;
 	binlogs = NULL;
 }
 
@@ -24,8 +24,8 @@ SSDBImpl::~SSDBImpl(){
 	if(binlogs){
 		delete binlogs;
 	}
-	if(db){
-		delete db;
+	if(ldb){
+		delete ldb;
 	}
 	if(options.block_cache){
 		delete options.block_cache;
@@ -37,6 +37,7 @@ SSDBImpl::~SSDBImpl(){
 
 SSDB* SSDB::open(const Options &opt, const std::string &dir){
 	SSDBImpl *ssdb = new SSDBImpl();
+	ssdb->options.max_file_size = 32 * 1048576; // leveldb 1.20
 	ssdb->options.create_if_missing = true;
 	ssdb->options.max_open_files = opt.max_open_files;
 	ssdb->options.filter_policy = leveldb::NewBloomFilterPolicy(10);
@@ -52,12 +53,12 @@ SSDB* SSDB::open(const Options &opt, const std::string &dir){
 
 	leveldb::Status status;
 
-	status = leveldb::DB::Open(ssdb->options, dir, &ssdb->db);
+	status = leveldb::DB::Open(ssdb->options, dir, &ssdb->ldb);
 	if(!status.ok()){
-		log_error("open db failed");
+		log_error("open db failed: %s", status.ToString().c_str());
 		goto err;
 	}
-	ssdb->binlogs = new BinlogQueue(ssdb->db, opt.binlog);
+	ssdb->binlogs = new BinlogQueue(ssdb->ldb, opt.binlog, opt.binlog_capacity);
 
 	return ssdb;
 err:
@@ -67,11 +68,46 @@ err:
 	return NULL;
 }
 
+int SSDBImpl::flushdb(){
+	int ret = 0;
+	bool stop = false;
+	{
+		Transaction trans(binlogs);
+		while(!stop){
+			leveldb::Iterator *it;
+			leveldb::ReadOptions iterate_options;
+			iterate_options.fill_cache = false;
+			leveldb::WriteOptions write_opts;
+
+			it = ldb->NewIterator(iterate_options);
+			it->SeekToFirst();
+			for(int i=0; i<10000; i++){
+				if(!it->Valid()){
+					stop = true;
+					break;
+				}
+				//log_debug("%s", hexmem(it->key().data(), it->key().size()).c_str());
+				leveldb::Status s = ldb->Delete(write_opts, it->key());
+				if(!s.ok()){
+					log_error("del error: %s", s.ToString().c_str());
+					stop = true;
+					ret = -1;
+					break;
+				}
+				it->Next();
+			}
+			delete it;
+		}
+	}
+	binlogs->flush();
+	return ret;
+}
+
 Iterator* SSDBImpl::iterator(const std::string &start, const std::string &end, uint64_t limit){
 	leveldb::Iterator *it;
 	leveldb::ReadOptions iterate_options;
 	iterate_options.fill_cache = false;
-	it = db->NewIterator(iterate_options);
+	it = ldb->NewIterator(iterate_options);
 	it->Seek(start);
 	if(it->Valid() && it->key() == start){
 		it->Next();
@@ -83,7 +119,7 @@ Iterator* SSDBImpl::rev_iterator(const std::string &start, const std::string &en
 	leveldb::Iterator *it;
 	leveldb::ReadOptions iterate_options;
 	iterate_options.fill_cache = false;
-	it = db->NewIterator(iterate_options);
+	it = ldb->NewIterator(iterate_options);
 	it->Seek(start);
 	if(!it->Valid()){
 		it->SeekToLast();
@@ -97,7 +133,7 @@ Iterator* SSDBImpl::rev_iterator(const std::string &start, const std::string &en
 
 int SSDBImpl::raw_set(const Bytes &key, const Bytes &val){
 	leveldb::WriteOptions write_opts;
-	leveldb::Status s = db->Put(write_opts, slice(key), slice(val));
+	leveldb::Status s = ldb->Put(write_opts, slice(key), slice(val));
 	if(!s.ok()){
 		log_error("set error: %s", s.ToString().c_str());
 		return -1;
@@ -107,7 +143,7 @@ int SSDBImpl::raw_set(const Bytes &key, const Bytes &val){
 
 int SSDBImpl::raw_del(const Bytes &key){
 	leveldb::WriteOptions write_opts;
-	leveldb::Status s = db->Delete(write_opts, slice(key));
+	leveldb::Status s = ldb->Delete(write_opts, slice(key));
 	if(!s.ok()){
 		log_error("del error: %s", s.ToString().c_str());
 		return -1;
@@ -118,7 +154,7 @@ int SSDBImpl::raw_del(const Bytes &key){
 int SSDBImpl::raw_get(const Bytes &key, std::string *val){
 	leveldb::ReadOptions opts;
 	opts.fill_cache = false;
-	leveldb::Status s = db->Get(opts, slice(key), val);
+	leveldb::Status s = ldb->Get(opts, slice(key), val);
 	if(s.IsNotFound()){
 		return 0;
 	}
@@ -135,7 +171,7 @@ uint64_t SSDBImpl::size(){
 	leveldb::Range ranges[1];
 	ranges[0] = leveldb::Range(s, e);
 	uint64_t sizes[1];
-	db->GetApproximateSizes(ranges, 1, sizes);
+	ldb->GetApproximateSizes(ranges, 1, sizes);
 	return sizes[0];
 }
 
@@ -161,7 +197,7 @@ std::vector<std::string> SSDBImpl::info(){
 	for(size_t i=0; i<keys.size(); i++){
 		std::string key = keys[i];
 		std::string val;
-		if(db->GetProperty(key, &val)){
+		if(ldb->GetProperty(key, &val)){
 			info.push_back(key);
 			info.push_back(val);
 		}
@@ -171,7 +207,7 @@ std::vector<std::string> SSDBImpl::info(){
 }
 
 void SSDBImpl::compact(){
-	db->CompactRange(NULL, NULL);
+	ldb->CompactRange(NULL, NULL);
 }
 
 int SSDBImpl::key_range(std::vector<std::string> *keys){
@@ -244,7 +280,7 @@ int SSDBImpl::key_range(std::vector<std::string> *keys){
 		Bytes ks = it->key();
 		if(ks.data()[0] == DataType::ZSIZE){
 			std::string n;
-			if(decode_hsize_key(ks, &n) == -1){
+			if(decode_zsize_key(ks, &n) == -1){
 				ret = -1;
 			}else{
 				zstart = n;
@@ -258,7 +294,7 @@ int SSDBImpl::key_range(std::vector<std::string> *keys){
 		Bytes ks = it->key();
 		if(ks.data()[0] == DataType::ZSIZE){
 			std::string n;
-			if(decode_hsize_key(ks, &n) == -1){
+			if(decode_zsize_key(ks, &n) == -1){
 				ret = -1;
 			}else{
 				zend = n;

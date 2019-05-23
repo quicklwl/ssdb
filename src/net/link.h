@@ -24,10 +24,9 @@ class Link{
 		std::vector<Bytes> recv_data;
 
 		RedisLink *redis;
-
-		static int min_recv_buf;
-		static int min_send_buf;
 	public:
+		const static int MAX_PACKET_SIZE = 128 * 1024 * 1024;
+
 		char remote_ip[INET_ADDRSTRLEN];
 		int remote_port;
 

@@ -65,6 +65,7 @@ void BackendSync::proc(const Link *link){
 }
 
 void* BackendSync::_run_thread(void *arg){
+	pthread_detach(pthread_self());
 	struct run_arg *p = (struct run_arg*)arg;
 	BackendSync *backend = (BackendSync *)p->backend;
 	Link *link = (Link *)p->link;
@@ -95,20 +96,22 @@ void* BackendSync::_run_thread(void *arg){
 		// TODO: test
 		//usleep(2000 * 1000);
 		
-		if(client.status == Client::OUT_OF_SYNC){
-			client.reset();
-			continue;
-		}
-		
 		bool is_empty = true;
-		// WARN: MUST do first sync() before first copy(), because
-		// sync() will refresh last_seq, and copy() will not
-		if(client.sync(logs)){
-			is_empty = false;
-		}
-		if(client.status == Client::COPY){
-			if(client.copy()){
+		if(client.status == Client::OUT_OF_SYNC){
+			// will sleep afterwards.
+			// ssdb doesn't do anything, let people interfere, normally, people
+			// should make a backup of slave, stop, delete the meta and data
+			// folders, and startup again.
+		}else{
+			// WARN: MUST do first sync() before first copy(), because
+			// sync() will refresh last_seq, and copy() will not
+			if(client.sync(logs)){ // sync seq or binlog
 				is_empty = false;
+			}
+			if(client.status == Client::COPY){
+				if(client.copy()){
+					is_empty = false;
+				}
 			}
 		}
 		if(is_empty){
@@ -123,12 +126,12 @@ void* BackendSync::_run_thread(void *arg){
 			idle = 0;
 		}
 
-		float data_size_mb = link->output->size() / 1024.0 / 1024.0;
 		if(link->flush() == -1){
 			log_info("%s:%d fd: %d, send error: %s", link->remote_ip, link->remote_port, link->fd(), strerror(errno));
 			break;
 		}
 		if(backend->sync_speed > 0){
+			float data_size_mb = link->output->size() / 1024.0 / 1024.0;
 			usleep((data_size_mb / backend->sync_speed) * 1000 * 1000);
 		}
 	}
@@ -208,9 +211,22 @@ void BackendSync::Client::init(){
 			is_mirror = true;
 		}
 	}
+	
+	SSDBImpl *ssdb = (SSDBImpl *)backend->ssdb;
+	BinlogQueue *logs = ssdb->binlogs;
+	if(last_seq != 0 && (last_seq > logs->max_seq() || last_seq < logs->min_seq())){
+		log_error("%s:%d fd: %d OUT_OF_SYNC! seq: %" PRIu64 " not in [%" PRIu64 ", %" PRIu64 "]",
+			link->remote_ip, link->remote_port, link->fd(),
+			last_seq, logs->min_seq(), logs->max_seq()
+			);
+		this->out_of_sync();
+		return;
+	}
+	
 	const char *type = is_mirror? "mirror" : "sync";
+	// a slave must reset its last_key when receiving 'copy_end' command
 	if(last_key == "" && last_seq != 0){
-		log_info("[%s] %s:%d fd: %d, sync, seq: %" PRIu64 ", key: '%s'",
+		log_info("[%s] %s:%d fd: %d, sync recover, seq: %" PRIu64 ", key: '%s'",
 			type,
 			link->remote_ip, link->remote_port,
 			link->fd(),
@@ -221,8 +237,15 @@ void BackendSync::Client::init(){
 		Binlog log(this->last_seq, BinlogType::COPY, BinlogCommand::END, "");
 		log_trace("fd: %d, %s", link->fd(), log.dumps().c_str());
 		link->send(log.repr(), "copy_end");
+	}else if(last_key == "" && last_seq == 0){
+		log_info("[%s] %s:%d fd: %d, copy begin, seq: %" PRIu64 ", key: '%s'",
+			type,
+			link->remote_ip, link->remote_port,
+			link->fd(),
+			last_seq, hexmem(last_key.data(), last_key.size()).c_str()
+			);
+		this->reset();
 	}else{
-		// a slave must reset its last_key when receiving 'copy_end' command
 		log_info("[%s] %s:%d fd: %d, copy recover, seq: %" PRIu64 ", key: '%s'",
 			type,
 			link->remote_ip, link->remote_port,
@@ -244,6 +267,12 @@ void BackendSync::Client::reset(){
 	link->send(log.repr(), "copy_begin");
 }
 
+void BackendSync::Client::out_of_sync(){
+	this->status = Client::OUT_OF_SYNC;
+	Binlog noop(this->last_seq, BinlogType::CTRL, BinlogCommand::NONE, "OUT_OF_SYNC");
+	link->send(noop.repr());
+}
+
 void BackendSync::Client::noop(){
 	uint64_t seq;
 	if(this->status == Client::COPY && this->last_key.empty()){
@@ -254,7 +283,7 @@ void BackendSync::Client::noop(){
 	}
 	Binlog noop(seq, BinlogType::NOOP, BinlogCommand::NONE, "");
 	//log_debug("fd: %d, %s", link->fd(), noop.dumps().c_str());
-	link->send(noop.repr());
+	link->send(noop.repr(), "noop");
 }
 
 int BackendSync::Client::copy(){
@@ -273,10 +302,6 @@ int BackendSync::Client::copy(){
 	while(true){
 		// Prevent copy() from blocking too long
 		if(++iterate_count > 1000 || link->output->size() > 2 * 1024 * 1024){
-			break;
-		}
-		if(time_ms() - stime > 3000){
-			log_info("copy blocks too long, flush");
 			break;
 		}
 		
@@ -307,12 +332,16 @@ int BackendSync::Client::copy(){
 		}else{
 			continue;
 		}
-		
-		ret = 1;
+		ret++;
 		
 		Binlog log(this->last_seq, BinlogType::COPY, cmd, slice(key));
 		log_trace("fd: %d, %s", link->fd(), log.dumps().c_str());
 		link->send(log.repr(), val);
+		
+		if(time_ms() - stime > 3000){
+			log_info("copy blocks too long, flush");
+			break;
+		}
 	}
 	return ret;
 
@@ -328,6 +357,7 @@ copy_end:
 	return 1;
 }
 
+// sync seq and/or binlog
 int BackendSync::Client::sync(BinlogQueue *logs){
 	Binlog log;
 	while(1){
@@ -364,7 +394,7 @@ int BackendSync::Client::sync(BinlogQueue *logs){
 				log.seq(),
 				expect_seq
 				);
-			this->status = Client::OUT_OF_SYNC;
+			this->out_of_sync();
 			return 1;
 		}
 	
@@ -390,9 +420,6 @@ int BackendSync::Client::sync(BinlogQueue *logs){
 		case BinlogCommand::KSET:
 		case BinlogCommand::HSET:
 		case BinlogCommand::ZSET:
-		case BinlogCommand::QSET:
-		case BinlogCommand::QPUSH_BACK:
-		case BinlogCommand::QPUSH_FRONT:
 			ret = backend->ssdb->raw_get(log.key(), &val);
 			if(ret == -1){
 				log_error("fd: %d, raw_get error!", link->fd());
@@ -400,6 +427,18 @@ int BackendSync::Client::sync(BinlogQueue *logs){
 				//log_debug("%s", hexmem(log.key().data(), log.key().size()).c_str());
 				log_trace("fd: %d, skip not found: %s", link->fd(), log.dumps().c_str());
 			}else{
+				log_trace("fd: %d, %s", link->fd(), log.dumps().c_str());
+				link->send(log.repr(), val);
+			}
+			break;
+		case BinlogCommand::QSET:
+		case BinlogCommand::QPUSH_BACK:
+		case BinlogCommand::QPUSH_FRONT:
+			ret = backend->ssdb->raw_get(log.key(), &val);
+			if(ret == -1){
+				log_error("fd: %d, raw_get error!", link->fd());
+			}else{
+				// ret == 0: element popped, push an empty value(pop later in binlog)
 				log_trace("fd: %d, %s", link->fd(), log.dumps().c_str());
 				link->send(log.repr(), val);
 			}

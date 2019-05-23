@@ -1,3 +1,74 @@
+* 1.9.7
+	* New features:
+		- Support slaveof command(2018-04-27)
+		- Add hfix command(2018-11-21)
+	* Bug fixes:
+		- Fix queue/list replication bug(2019-01-02)
+		- Fix logrotate issue when log to stdout/stderr(2018-06-05)
+		- Fix coredump on exit(2018-07-18)
+		- Fix startup blocked by BinlogQueue::find_last()(2018-08-08)
+* 1.9.6
+	* New features:
+		- ssdb-cli supports command history(2018-04-24)
+		- Log slow query with WARN level(2017-11-08)
+		- Upgrade leveldb to version 1.20, fix MANIFEST file too large issue(2017-09-25)
+	* Incompatible changes:
+		- The SSDB_KEY_LEN_MAX limit will be applied to KV, as described in docs(2017-11-08)
+	* Bug fixes:
+		- Fix Xcode 9, iOS SDK 11 compile issue(2017-11-20)
+		- Fix Redis zrange, zrevrange, zremrangebyrank handle negative start/end bug(2017-12-05)
+* 1.9.5
+	* New features:
+		- C++ SDK add disconnected() method(2017-08-29)
+		- ssdb-cli supports -a option to connect with password(2017-07-19)
+		- Add slaveof.recv_timeout configuration(2017-05-03)
+	* Incompatible changes:
+		- setbit/getbit will be compatible with Redis, from LSB 0 to MSB 0(2017-05-16)
+	* Bug fixes:
+		- Fix ssdb-cli escape bug(2017-08-24)
+* 1.9.4
+	* Incompatible changes:
+		- Treat unsupported redis command's reply as REPLY_MULTI_BULK(2016-07-26)
+		- Not writting pidfile when not running daemonized(2016-07-17)
+	* New features:
+		- Support readonly mode(2016-10-11)
+		- Add OUT_OF_SYNC status, slave not flushdb when this status(2016-06-17)
+		- Config default block_size as 32(2017-01-18)
+	* Bug fixes:
+		- Fix bug that busy expiration blocks setx request(2016-10-14)
+		- Fix issues/1003, binlogs null pointer error caused by multi-threading during shutdown(2016-10-20)
+		- Make RedisLink AUTH reply exactly as Redis(2017-01-17)
+* 1.9.3
+	* New features:
+		- Do not allow slave request binlogs with seq greater than max_seq(2016-03-18)
+		- CLI comands with nagios output format(2016-03-06)
+		- User can input binary data via ssdb-cli(2016-02-24)
+		- Add ip_filter relative commands(2016-02-17)
+	* Bug fixes:
+		- Report error when setting ttl(expire) fail(2016-04-25)
+		- Fix ttl not be deleted when deleting the only one key with ttl in the db, issue#885(2016-03-02)
+		- Fix bug when connecting to multi masters, the slave saves only one master's status(2016-03-01)
+* 1.9.2
+	* New features:
+		- Binlog capacity can be set in config file(2016-01-14)
+		- Provide zfix command to repair broken zset(2015-12-02)
+		- Supports specifying slaveof.host in ssdb.conf(2015-11-23)
+		- Do not allow flushdb when replication is in use(2015-11-16)
+		- Provide server side flushdb(2015-09-17)
+		- The slave will flush db when receive copy_begin(2015-07-28)
+	* Incompatible changes:
+		- Will not support db size for redis clients(2015-08-07)
+	* Bug fixes:
+		- Fix ttl not be deleted when deleting the only one key with ttl in the db, issue#885(2016-03-02)
+		- Fix Logger bug on multi-threads, which halt the service for seconds(2016-01-25)
+		- Fix bug when ssdb-cli is soft linked(2016-01-25)
+		- Fix zclear infinite loop when data is broken(2015-12-02)
+		- Fix setbit crash on very big offset(2015-11-17)
+		- Fix Jedis zadd() score in scientific notation(2015-10-22)
+* 1.9.1
+	* Incompatible changes:
+		- zrank/zrrank return not_found(prev is error) if member not exists(2015-07-16)
+		- PHP API zrank/zrrank return null(prev is false) if member not exists(2015-07-16)
 * 1.9.0
 	* New features:
 		- Update MAX_PACKET_SIZE to 128MB(2015-04-28)

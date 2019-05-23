@@ -3,10 +3,7 @@ Copyright (c) 2012-2014 The SSDB Authors. All rights reserved.
 Use of this source code is governed by a BSD-style license that can be
 found in the LICENSE file.
 */
-/* zset */
-#include "serv.h"
-#include "net/proc.h"
-#include "net/server.h"
+#include "proc_zset.h"
 
 int proc_zexists(NetworkServer *net, Link *link, const Request &req, Response *resp){
 	SSDBServer *serv = (SSDBServer *)net->data;
@@ -165,7 +162,11 @@ int proc_zrank(NetworkServer *net, Link *link, const Request &req, Response *res
 	CHECK_NUM_PARAMS(3);
 
 	int64_t ret = serv->ssdb->zrank(req[1], req[2]);
-	resp->reply_int(ret, ret);
+	if(ret == -1){
+		resp->add("not_found");
+	}else{
+		resp->reply_int(ret, ret);
+	}
 	return 0;
 }
 
@@ -174,7 +175,11 @@ int proc_zrrank(NetworkServer *net, Link *link, const Request &req, Response *re
 	CHECK_NUM_PARAMS(3);
 
 	int64_t ret = serv->ssdb->zrrank(req[1], req[2]);
-	resp->reply_int(ret, ret);
+	if(ret == -1){
+		resp->add("not_found");
+	}else{
+		resp->reply_int(ret, ret);
+	}
 	return 0;
 }
 
@@ -210,17 +215,90 @@ int proc_zrrange(NetworkServer *net, Link *link, const Request &req, Response *r
 	return 0;
 }
 
+int proc_redis_zrange(NetworkServer *net, Link *link, const Request &req, Response *resp){
+	SSDBServer *serv = (SSDBServer *)net->data;
+	CHECK_NUM_PARAMS(4);
+
+	int64_t start = req[2].Int64();
+	int64_t end = req[3].Int64();
+	uint64_t limit;
+	if(start < 0 || end < 0){
+		int64_t size = serv->ssdb->zsize(req[1]);
+		if(start < 0){
+			start = size + start;
+			if(start < 0){
+				start = 0;
+			}
+		}
+		if(end < 0){
+			end = size + end;
+		}
+	}
+	if(end < 0 || start > end){
+		resp->push_back("ok");
+		return 0;
+	}
+	limit = end - start + 1;
+
+	ZIterator *it = serv->ssdb->zrange(req[1], start, limit);
+	resp->push_back("ok");
+	while(it->next()){
+		resp->push_back(it->key);
+		resp->push_back(it->score);
+	}
+	delete it;
+	return 0;
+}
+
+int proc_redis_zrrange(NetworkServer *net, Link *link, const Request &req, Response *resp){
+	SSDBServer *serv = (SSDBServer *)net->data;
+	CHECK_NUM_PARAMS(4);
+
+	int64_t start = req[2].Int64();
+	int64_t end = req[3].Int64();
+	uint64_t limit;
+	if(start < 0 || end < 0){
+		int64_t size = serv->ssdb->zsize(req[1]);
+		if(start < 0){
+			start = size + start;
+			if(start < 0){
+				start = 0;
+			}
+		}
+		if(end < 0){
+			end = size + end;
+		}
+	}
+	if(end < 0 || start > end){
+		resp->push_back("ok");
+		return 0;
+	}
+	limit = end - start + 1;
+
+	ZIterator *it = serv->ssdb->zrrange(req[1], start, limit);
+	resp->push_back("ok");
+	while(it->next()){
+		resp->push_back(it->key);
+		resp->push_back(it->score);
+	}
+	delete it;
+	return 0;
+}
+
 int proc_zclear(NetworkServer *net, Link *link, const Request &req, Response *resp){
 	SSDBServer *serv = (SSDBServer *)net->data;
 	CHECK_NUM_PARAMS(2);
 	
 	const Bytes &name = req[1];
 	int64_t count = 0;
+	std::string key_start, score_start;
 	while(1){
-		ZIterator *it = serv->ssdb->zrange(name, 0, 1000);
+		ZIterator *it = serv->ssdb->zscan(name, key_start, score_start, "", 1000);
 		int num = 0;
 		while(it->next()){
-			int ret = serv->ssdb->zdel(name, it->key);
+			key_start = it->key;
+			score_start = it->score;
+			int ret = serv->ssdb->zdel(name, key_start);
 			if(ret == -1){
 				resp->push_back("error");
 				delete it;
@@ -420,8 +498,25 @@ int proc_zremrangebyrank(NetworkServer *net, Link *link, const Request &req, Res
 	SSDBServer *serv = (SSDBServer *)net->data;
 	CHECK_NUM_PARAMS(4);
 
-	uint64_t start = req[2].Uint64();
-	uint64_t end = req[3].Uint64();
+	int64_t start = req[2].Int64();
+	int64_t end = req[3].Int64();
+	if(start < 0 || end < 0){
+		int64_t size = serv->ssdb->zsize(req[1]);
+		if(start < 0){
+			start = size + start;
+			if(start < 0){
+				start = 0;
+			}
+		}
+		if(end < 0){
+			end = size + end;
+		}
+	}
+	if(end < 0 || start > end){
+		resp->reply_int(0, 0);
+		return 0;
+	}
+	
 	ZIterator *it = serv->ssdb->zrange(req[1], start, end - start + 1);
 	int64_t count = 0;
 	while(it->next()){
@@ -476,3 +571,12 @@ int proc_zpop_back(NetworkServer *net, Link *link, const Request &req, Response 
 	return 0;
 }
 
+int proc_zfix(NetworkServer *net, Link *link, const Request &req, Response *resp){
+	SSDBServer *serv = (SSDBServer *)net->data;
+	CHECK_NUM_PARAMS(2);
+	
+	const Bytes &name = req[1];
+	int64_t ret = serv->ssdb->zfix(name);
+	resp->reply_int(ret, ret);
+	return 0;
+}

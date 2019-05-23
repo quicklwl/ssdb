@@ -3,10 +3,7 @@ Copyright (c) 2012-2014 The SSDB Authors. All rights reserved.
 Use of this source code is governed by a BSD-style license that can be
 found in the LICENSE file.
 */
-/* kv */
-#include "serv.h"
-#include "net/proc.h"
-#include "net/server.h"
+#include "proc_kv.h"
 
 int proc_get(NetworkServer *net, Link *link, const Request &req, Response *resp){
 	SSDBServer *serv = (SSDBServer *)net->data;
@@ -101,8 +98,10 @@ int proc_expire(NetworkServer *net, Link *link, const Request &req, Response *re
 		if(ret != -1){
 			resp->push_back("ok");
 			resp->push_back("1");
-			return 0;
+		}else{
+			resp->push_back("error");
 		}
+		return 0;
 	}
 	resp->push_back("ok");
 	resp->push_back("0");
@@ -316,6 +315,14 @@ int proc_setbit(NetworkServer *net, Link *link, const Request &req, Response *re
 	if(req[3].size() == 0 || (req[3].data()[0] != '0' && req[3].data()[0] != '1')){
 		resp->push_back("client_error");
 		resp->push_back("bit is not an integer or out of range");
+		return 0;
+	}
+	if(offset < 0 || offset > Link::MAX_PACKET_SIZE * 8){
+		std::string msg = "offset is out of range [0, ";
+		msg += str(Link::MAX_PACKET_SIZE * 8);
+		msg += "]";
+		resp->push_back("client_error");
+		resp->push_back(msg);
 		return 0;
 	}
 	int on = req[3].Int();

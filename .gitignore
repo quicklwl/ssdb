@@ -1,6 +1,8 @@
+ssdb-server*
 ios
 888*.conf
 var888*
+*.exe
 *.o
 *.a
 *.out
@@ -12,6 +14,7 @@ var/*
 var_*
 var_slave/*
 dev_ssdb.conf*
+dev_slave.conf
 *.swp
 *_cpy_*
 *.dSYM*
@@ -31,6 +34,7 @@ api/cpp/SSDB_client.h
 api/cpp/test
 api/cpp/html
 api/php/a.php
+api/php/b.php
 api/php/c.php
 api/java/Test.java
 src/util/test_sorted_set

@@ -87,7 +87,7 @@ int64_t SSDBImpl::hsize(const Bytes &name){
 	std::string val;
 	leveldb::Status s;
 
-	s = db->Get(leveldb::ReadOptions(), size_key, &val);
+	s = ldb->Get(leveldb::ReadOptions(), size_key, &val);
 	if(s.IsNotFound()){
 		return 0;
 	}else if(!s.ok()){
@@ -96,7 +96,8 @@ int64_t SSDBImpl::hsize(const Bytes &name){
 		if(val.size() != sizeof(uint64_t)){
 			return 0;
 		}
-		int64_t ret = *(int64_t *)val.data();
+		int64_t ret; 
+		memcpy(&ret, val.data(), sizeof(int64_t));
 		return ret < 0? 0 : ret;
 	}
 }
@@ -126,7 +127,7 @@ int64_t SSDBImpl::hclear(const Bytes &name){
 
 int SSDBImpl::hget(const Bytes &name, const Bytes &key, std::string *val){
 	std::string dbkey = encode_hash_key(name, key);
-	leveldb::Status s = db->Get(leveldb::ReadOptions(), dbkey, val);
+	leveldb::Status s = ldb->Get(leveldb::ReadOptions(), dbkey, val);
 	if(s.IsNotFound()){
 		return 0;
 	}
@@ -278,4 +279,24 @@ static int incr_hsize(SSDBImpl *ssdb, const Bytes &name, int64_t incr){
 		ssdb->binlogs->Put(size_key, leveldb::Slice((char *)&size, sizeof(int64_t)));
 	}
 	return 0;
+}
+
+int64_t SSDBImpl::hfix(const Bytes &name){
+	Transaction trans(binlogs);
+
+	uint64_t size = 0;
+	HIterator *it = this->hscan(name, "", "", UINT64_MAX);
+	while(it->next()){
+		size ++;
+	}
+	delete it;
+
+	std::string size_key = encode_hsize_key(name);
+	if(size == 0){
+		binlogs->Delete(size_key);
+	}else{
+		binlogs->Put(size_key, leveldb::Slice((char *)&size, sizeof(int64_t)));
+	}
+	
+	return size;
 }
